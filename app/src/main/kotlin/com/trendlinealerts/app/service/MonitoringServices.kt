@@ -292,6 +292,8 @@ class MonitoringForegroundService : Service() {
 
             startNotificationCountdownJob()
 
+            val firstNextTick = nextMinutePlusTwoSecondsMs(System.currentTimeMillis())
+            container.monitorStateRepository.setNextCheckAtMs(firstNextTick)
             runSingleCycle()
 
             while (isActive) {
@@ -333,7 +335,7 @@ class MonitoringForegroundService : Service() {
             "TrendlineAlerts::PollWakeLock"
         ).apply { setReferenceCounted(false) }
 
-        wakeLock.acquire(45_000L)
+        wakeLock.acquire(90_000L)
         try {
             val prefs = container.settingsDataStore.getSnapshot()
             val settings = prefs.alertSettings
@@ -350,25 +352,34 @@ class MonitoringForegroundService : Service() {
 
             val nowMs = System.currentTimeMillis()
 
+            // 1. Fetch 1m candles first so live prices appear quickly even on slow connections
+            val minuteResults = container.adaptiveMarketDataSource.fetchRecent1mCandlesBatch(
+                symbols = symbols,
+                limit = 3
+            )
+
+            // 2. Ensure HTF cache is current
             val htfResults = container.htfCandleCache.ensureCurrentBatch(
                 symbols = symbols,
                 timeframe = settings.timeframe,
                 nowMs = nowMs
             )
 
+            var firstError: Throwable? = null
+            var successCount = 0
+
             for (symbol in symbols) {
                 val state = symbolStates.getOrPut(symbol) { SymbolEngineState(symbol) }
-                val htfRes = htfResults[symbol]?.getOrNull()
+                val htfOutcome = htfResults[symbol]
+                val htfRes = htfOutcome?.getOrNull()
+                if (htfOutcome != null && htfOutcome.isFailure && firstError == null) {
+                    firstError = htfOutcome.exceptionOrNull()
+                }
                 if (htfRes != null && (htfRes.didRefreshFromNetwork || state.currentTrendlines == null)) {
                     val computed = trendlineEngine.compute(symbol, htfRes.closedCandles)
                     state.applyTrendlines(computed)
                 }
             }
-
-            val minuteResults = container.adaptiveMarketDataSource.fetchRecent1mCandlesBatch(
-                symbols = symbols,
-                limit = 3
-            )
 
             val evalNowMs = System.currentTimeMillis()
             val candidates = ArrayList<DetectedEvent>()
@@ -376,7 +387,13 @@ class MonitoringForegroundService : Service() {
 
             for (symbol in symbols) {
                 val state = symbolStates[symbol] ?: continue
-                val candles1m = minuteResults[symbol]?.getOrNull() ?: emptyList()
+                val minOutcome = minuteResults[symbol]
+                val candles1m = minOutcome?.getOrNull()
+                if (minOutcome != null && minOutcome.isFailure && firstError == null) {
+                    firstError = minOutcome.exceptionOrNull()
+                }
+                if (candles1m == null) continue
+                successCount++
 
                 val lastClosed1m: Candle? = candles1m
                     .asSequence()
@@ -443,12 +460,23 @@ class MonitoringForegroundService : Service() {
                 lastAlertSymbol = dispatchOutcome.updatedState.lastAlertSymbol,
                 nextAlertAllowedAtMs = dispatchOutcome.nextAlertAllowedAtMs
             )
-            container.monitorStateRepository.setLastCycleError(null)
+
+            if (successCount == 0 && firstError != null) {
+                container.monitorStateRepository.setLastCycleError(
+                    "${firstError::class.simpleName}: ${firstError.message ?: "Network error"}"
+                )
+            } else if (firstError != null && successCount < symbols.size) {
+                container.monitorStateRepository.setLastCycleError(
+                    "Partial data ($successCount/${symbols.size}): ${firstError.message}"
+                )
+            } else {
+                container.monitorStateRepository.setLastCycleError(null)
+            }
         } catch (ce: CancellationException) {
             throw ce
         } catch (t: Throwable) {
             container.monitorStateRepository.setLastCycleError(
-                t.message ?: "Error during monitoring cycle"
+                "${t::class.simpleName}: ${t.message ?: "Error during monitoring cycle"}"
             )
         } finally {
             if (wakeLock.isHeld) {
