@@ -28,7 +28,8 @@ import kotlin.random.Random
 
 enum class DataSourceType(val displayName: String) {
     BINANCE("Binance USDT-M Futures"),
-    BYBIT("Bybit Linear Perps")
+    BYBIT("Bybit Linear Perps"),
+    OKX("OKX USDT-M Perps")
 }
 
 interface MarketDataSource {
@@ -37,7 +38,7 @@ interface MarketDataSource {
     suspend fun fetchHtfCandles(
         symbol: String,
         timeframe: Timeframe,
-        limit: Int = 1500
+        limit: Int = 1000
     ): List<Candle>
 
     suspend fun fetchRecent1mCandles(
@@ -194,38 +195,18 @@ class BybitMarketDataSource(
         timeframe: Timeframe,
         limit: Int
     ): List<Candle> {
-        val target = limit.coerceIn(1, 1500)
-        val collected = LinkedHashMap<Long, Candle>(target)
-        var endCursor: Long? = null
-
-        while (collected.size < target) {
-            val batchSize = minOf(1000, target - collected.size)
-            val response = api.getKline(
-                category = "linear",
-                symbol = symbol.uppercase(),
-                interval = timeframe.bybitInterval,
-                limit = batchSize,
-                end = endCursor
-            )
-            if (response.retCode != 0) {
-                throw IllegalStateException("Bybit kline error ${response.retCode}: ${response.retMsg}")
-            }
-            val rows = response.result.list
-            if (rows.isEmpty()) break
-
-            var oldestOpenTime = Long.MAX_VALUE
-            for (row in rows) {
-                val candle = parseBybitKline(row, timeframe.intervalMs)
-                collected[candle.openTime] = candle
-                if (candle.openTime < oldestOpenTime) {
-                    oldestOpenTime = candle.openTime
-                }
-            }
-            if (rows.size < batchSize || oldestOpenTime == Long.MAX_VALUE) break
-            endCursor = oldestOpenTime - 1L
+        val response = api.getKline(
+            category = "linear",
+            symbol = symbol.uppercase(),
+            interval = timeframe.bybitInterval,
+            limit = limit.coerceIn(1, 1000)
+        )
+        if (response.retCode != 0) {
+            throw IllegalStateException("Bybit kline error ${response.retCode}: ${response.retMsg}")
         }
-
-        return collected.values.sortedBy { it.openTime }
+        return response.result.list
+            .map { parseBybitKline(it, timeframe.intervalMs) }
+            .sortedBy { it.openTime }
     }
 
     override suspend fun fetchRecent1mCandles(
@@ -285,11 +266,144 @@ class BybitMarketDataSource(
     }
 }
 
+@Serializable
+data class OkxCandlesResponse(
+    val code: String = "",
+    val msg: String = "",
+    val data: List<List<String>> = emptyList()
+)
+
+@Serializable
+data class OkxInstrumentsResponse(
+    val code: String = "",
+    val msg: String = "",
+    val data: List<OkxInstrumentInfo> = emptyList()
+)
+
+@Serializable
+data class OkxInstrumentInfo(
+    val instId: String = "",
+    val settleCcy: String = "",
+    val state: String = ""
+)
+
+interface OkxApi {
+    @GET("api/v5/market/candles")
+    suspend fun getCandles(
+        @Query("instId") instId: String,
+        @Query("bar") bar: String,
+        @Query("limit") limit: Int = 300,
+        @Query("after") after: Long? = null
+    ): OkxCandlesResponse
+
+    @GET("api/v5/public/instruments")
+    suspend fun getInstruments(
+        @Query("instType") instType: String = "SWAP"
+    ): OkxInstrumentsResponse
+}
+
+class OkxMarketDataSource(
+    private val api: OkxApi
+) : MarketDataSource {
+
+    override val sourceType: DataSourceType = DataSourceType.OKX
+
+    override suspend fun fetchHtfCandles(
+        symbol: String,
+        timeframe: Timeframe,
+        limit: Int
+    ): List<Candle> {
+        val instId = toOkxInstId(symbol)
+        val target = limit.coerceIn(1, 900)
+        val collected = LinkedHashMap<Long, Candle>(target)
+        var afterCursor: Long? = null
+
+        while (collected.size < target) {
+            val batchSize = minOf(300, target - collected.size)
+            val response = api.getCandles(
+                instId = instId,
+                bar = timeframe.label,
+                limit = batchSize,
+                after = afterCursor
+            )
+            if (response.code != "0") {
+                throw IllegalStateException("OKX candles error ${response.code}: ${response.msg}")
+            }
+            val rows = response.data
+            if (rows.isEmpty()) break
+
+            var oldestOpenTime = Long.MAX_VALUE
+            for (row in rows) {
+                val candle = parseOkxRow(row, timeframe.intervalMs)
+                collected[candle.openTime] = candle
+                if (candle.openTime < oldestOpenTime) {
+                    oldestOpenTime = candle.openTime
+                }
+            }
+            if (rows.size < batchSize || oldestOpenTime == Long.MAX_VALUE) break
+            afterCursor = oldestOpenTime
+        }
+
+        return collected.values.sortedBy { it.openTime }
+    }
+
+    override suspend fun fetchRecent1mCandles(
+        symbol: String,
+        limit: Int
+    ): List<Candle> {
+        val response = api.getCandles(
+            instId = toOkxInstId(symbol),
+            bar = "1m",
+            limit = limit.coerceIn(1, 100)
+        )
+        if (response.code != "0") {
+            throw IllegalStateException("OKX 1m error ${response.code}: ${response.msg}")
+        }
+        return response.data
+            .map { parseOkxRow(it, 60_000L) }
+            .sortedBy { it.openTime }
+    }
+
+    override suspend fun fetchValidPerpetualSymbols(): Set<String> {
+        val response = api.getInstruments(instType = "SWAP")
+        if (response.code != "0") {
+            throw IllegalStateException("OKX instruments error ${response.code}: ${response.msg}")
+        }
+        return response.data
+            .asSequence()
+            .filter {
+                it.state.equals("live", ignoreCase = true) &&
+                    it.settleCcy.equals("USDT", ignoreCase = true) &&
+                    it.instId.endsWith("-USDT-SWAP", ignoreCase = true)
+            }
+            .map { it.instId.removeSuffix("-USDT-SWAP").uppercase() + "USDT" }
+            .toSet()
+    }
+
+    private fun toOkxInstId(symbol: String): String {
+        val upper = symbol.uppercase()
+        val base = upper.removeSuffix("USDT")
+        return "$base-USDT-SWAP"
+    }
+
+    private fun parseOkxRow(row: List<String>, intervalMs: Long): Candle {
+        val openTime = row[0].toLong()
+        return Candle(
+            openTime = openTime,
+            open = row[1].toDouble(),
+            high = row[2].toDouble(),
+            low = row[3].toDouble(),
+            close = row[4].toDouble(),
+            closeTime = openTime + intervalMs - 1L
+        )
+    }
+}
+
 class RateLimitCoordinator {
     private val blockedUntilMs = AtomicLong(0L)
 
     suspend fun <T> executeWithBackoff(
-        maxAttempts: Int = 4,
+        maxAttempts: Int = 3,
         block: suspend () -> T
     ): T {
         var attempt = 0
@@ -301,7 +415,7 @@ class RateLimitCoordinator {
                 return block()
             } catch (http: HttpException) {
                 val code = http.code()
-                if (code == 451 || code == 403) {
+                if (code == 451 || code == 403 || code == 404) {
                     throw http
                 }
                 if (code == 429 || code == 418) {
@@ -353,7 +467,7 @@ class RateLimitCoordinator {
 
     companion object {
         private const val INITIAL_BACKOFF_MS = 1_500L
-        private const val MAX_BACKOFF_MS = 60_000L
+        private const val MAX_BACKOFF_MS = 30_000L
     }
 }
 
@@ -366,11 +480,12 @@ data class MarketDataStatus(
 class AdaptiveMarketDataSource(
     private val binance: MarketDataSource,
     private val bybit: MarketDataSource,
+    private val okx: MarketDataSource,
     private val rateLimiter: RateLimitCoordinator = RateLimitCoordinator(),
-    maxConcurrentRequests: Int = 5
+    maxConcurrentRequests: Int = 3
 ) {
     private val semaphore = Semaphore(permits = maxConcurrentRequests)
-    private val consecutiveBinanceFailures = AtomicInteger(0)
+    private val consecutiveFailures = AtomicInteger(0)
 
     private val _status = MutableStateFlow(MarketDataStatus())
     val status: StateFlow<MarketDataStatus> = _status.asStateFlow()
@@ -380,7 +495,7 @@ class AdaptiveMarketDataSource(
 
     fun setManualPreference(preference: DataSourceType) {
         manualPreference = preference
-        consecutiveBinanceFailures.set(0)
+        consecutiveFailures.set(0)
         _status.value = MarketDataStatus(
             activeSource = preference,
             autoSwitchedToBybit = false,
@@ -393,7 +508,7 @@ class AdaptiveMarketDataSource(
     suspend fun fetchHtfCandles(
         symbol: String,
         timeframe: Timeframe,
-        limit: Int = 1500
+        limit: Int = 1000
     ): List<Candle> = executeWithFailover { source ->
         source.fetchHtfCandles(symbol, timeframe, limit)
     }
@@ -429,40 +544,45 @@ class AdaptiveMarketDataSource(
             val result = semaphore.withPermit {
                 rateLimiter.executeWithBackoff { block(source) }
             }
-            if (active == DataSourceType.BINANCE) {
-                consecutiveBinanceFailures.set(0)
-            }
+            consecutiveFailures.set(0)
             result
         } catch (ce: CancellationException) {
             throw ce
         } catch (t: Throwable) {
-            if (active == DataSourceType.BINANCE && manualPreference == DataSourceType.BINANCE) {
-                val isHardBlock = (t as? HttpException)?.code() in setOf(451, 403)
-                val failures = consecutiveBinanceFailures.incrementAndGet()
-                if (isHardBlock || failures >= AUTO_FAILOVER_FAILURE_THRESHOLD) {
-                    val reason = if (isHardBlock) {
-                        val code = (t as HttpException).code()
-                        "Binance returned HTTP $code — switched automatically to Bybit."
-                    } else {
-                        "Binance failed repeatedly — switched automatically to Bybit."
-                    }
-                    _status.value = MarketDataStatus(
-                        activeSource = DataSourceType.BYBIT,
-                        autoSwitchedToBybit = true,
-                        bannerMessage = reason
-                    )
-                    return semaphore.withPermit {
-                        rateLimiter.executeWithBackoff { block(bybit) }
-                    }
+            val isHardBlock = (t as? HttpException)?.code() in setOf(451, 403)
+            val failures = consecutiveFailures.incrementAndGet()
+            val nextSourceType = nextFallback(active)
+            if (nextSourceType != null && (isHardBlock || failures >= AUTO_FAILOVER_FAILURE_THRESHOLD)) {
+                consecutiveFailures.set(0)
+                val reason = if (isHardBlock) {
+                    val code = (t as HttpException).code()
+                    "${active.displayName} returned HTTP $code — switched to ${nextSourceType.displayName}."
+                } else {
+                    "${active.displayName} failed repeatedly — switched to ${nextSourceType.displayName}."
+                }
+                _status.value = MarketDataStatus(
+                    activeSource = nextSourceType,
+                    autoSwitchedToBybit = nextSourceType == DataSourceType.BYBIT,
+                    bannerMessage = reason
+                )
+                return semaphore.withPermit {
+                    rateLimiter.executeWithBackoff { block(sourceFor(nextSourceType)) }
                 }
             }
             throw t
         }
     }
 
+    private fun nextFallback(current: DataSourceType): DataSourceType? = when (current) {
+        DataSourceType.BINANCE -> DataSourceType.BYBIT
+        DataSourceType.BYBIT -> DataSourceType.OKX
+        DataSourceType.OKX -> null
+    }
+
     private fun sourceFor(type: DataSourceType): MarketDataSource = when (type) {
         DataSourceType.BINANCE -> binance
         DataSourceType.BYBIT -> bybit
+        DataSourceType.OKX -> okx
     }
 
     companion object {
