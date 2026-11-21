@@ -9,6 +9,8 @@ import com.trendlinealerts.app.data.remote.BinanceApi
 import com.trendlinealerts.app.data.remote.BinanceMarketDataSource
 import com.trendlinealerts.app.data.remote.BybitApi
 import com.trendlinealerts.app.data.remote.BybitMarketDataSource
+import com.trendlinealerts.app.data.remote.OkxApi
+import com.trendlinealerts.app.data.remote.OkxMarketDataSource
 import com.trendlinealerts.app.data.remote.RateLimitCoordinator
 import com.trendlinealerts.app.data.repository.AlertLogRepository
 import com.trendlinealerts.app.data.repository.MonitorStateRepository
@@ -31,10 +33,20 @@ class AppContainer(context: Context) {
     }
 
     private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
-        .writeTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(25, TimeUnit.SECONDS)
+        .readTimeout(35, TimeUnit.SECONDS)
+        .writeTimeout(25, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
+        .addInterceptor { chain ->
+            val req = chain.request().newBuilder()
+                .header(
+                    "User-Agent",
+                    "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+                )
+                .header("Accept", "application/json")
+                .build()
+            chain.proceed(req)
+        }
         .build()
 
     private val jsonMediaType = "application/json".toMediaType()
@@ -53,13 +65,21 @@ class AppContainer(context: Context) {
         .build()
         .create(BybitApi::class.java)
 
+    private val okxApi: OkxApi = Retrofit.Builder()
+        .baseUrl("https://www.okx.com/")
+        .client(okHttpClient)
+        .addConverterFactory(json.asConverterFactory(jsonMediaType))
+        .build()
+        .create(OkxApi::class.java)
+
     val rateLimitCoordinator = RateLimitCoordinator()
 
     val adaptiveMarketDataSource = AdaptiveMarketDataSource(
         binance = BinanceMarketDataSource(binanceApi),
         bybit = BybitMarketDataSource(bybitApi),
+        okx = OkxMarketDataSource(okxApi),
         rateLimiter = rateLimitCoordinator,
-        maxConcurrentRequests = 5
+        maxConcurrentRequests = 3
     )
 
     val database: AppDatabase = AppDatabase.build(appContext)
