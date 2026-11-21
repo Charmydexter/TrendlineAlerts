@@ -292,14 +292,16 @@ class SettingsDataStore(context: Context) {
     }
 
     suspend fun saveDispatcherState(state: DispatcherPersistedState) {
+        val symbol = state.lastAlertSymbol
+        val timeMs = state.lastAlertTimeMs
         dataStore.edit { prefs ->
-            if (state.lastAlertSymbol != null) {
-                prefs[KEY_LAST_ALERT_SYMBOL] = state.lastAlertSymbol
+            if (symbol != null) {
+                prefs[KEY_LAST_ALERT_SYMBOL] = symbol
             } else {
                 prefs.remove(KEY_LAST_ALERT_SYMBOL)
             }
-            if (state.lastAlertTimeMs != null) {
-                prefs[KEY_LAST_ALERT_TIME_MS] = state.lastAlertTimeMs
+            if (timeMs != null) {
+                prefs[KEY_LAST_ALERT_TIME_MS] = timeMs
             } else {
                 prefs.remove(KEY_LAST_ALERT_TIME_MS)
             }
