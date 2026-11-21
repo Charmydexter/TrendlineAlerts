@@ -502,7 +502,7 @@ class EventDetectorTest {
         val second = detector.evaluate(
             state,
             candle,
-            Candle(130_000L, 999.2, 999.2, 998.0, 998.2, 189_999L),
+            Candle(130_000L, 998.5, 998.5, 998.0, 998.2, 189_999L),
             140_000L,
             settings
         )
