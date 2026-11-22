@@ -16,6 +16,8 @@ jobs:
       - name: Extract v2.0 bundle if uploaded as zip
         run: |
           if [ -f TradingAlerts-v2.0-Android.zip ]; then
+            # remove any stale sources first so old files can never mix with the new bundle
+            rm -rf core app gradle
             python3 -c "import zipfile; zipfile.ZipFile('TradingAlerts-v2.0-Android.zip').extractall('.')"
           fi
 
