@@ -13,12 +13,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract v2.0 bundle if uploaded as zip
+      - name: Extract v2.2 bundle if uploaded as zip
         run: |
-          if [ -f TradingAlerts-v2.0-Android.zip ]; then
-            # remove any stale sources first so old files can never mix with the new bundle
+          if [ -f TradingAlerts-v2.2-Android.zip ]; then
             rm -rf core app gradle
-            python3 -c "import zipfile; zipfile.ZipFile('TradingAlerts-v2.0-Android.zip').extractall('.')"
+            python3 -c "import zipfile; zipfile.ZipFile('TradingAlerts-v2.2-Android.zip').extractall('.')"
           fi
 
       - name: Set up JDK 17
