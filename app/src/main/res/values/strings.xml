@@ -1,7 +1,0 @@
-<resources>
-    <string name="app_name">Trendline Alerts</string>
-    <string name="channel_monitor_name">Monitoring Status</string>
-    <string name="channel_monitor_desc">Ongoing status of the 1-minute perpetual trendline monitor</string>
-    <string name="channel_alerts_name">Trendline Alerts</string>
-    <string name="channel_alerts_desc">High-priority notifications for CROSS, TOUCH, and KISS events</string>
-</resources>
