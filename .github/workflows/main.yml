@@ -3,7 +3,7 @@ name: Build Trading Alerts APK
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master ]
+    branches: [ '**' ]
 
 jobs:
   build:
@@ -13,11 +13,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract v2.3 bundle if uploaded as zip
+      - name: Extract v3.0 Android bundle if uploaded as zip
         run: |
-          if [ -f TradingAlerts-v2.3-Android.zip ]; then
+          if [ -f TradingAlerts-v3.0-Android.zip ]; then
             rm -rf core app gradle
-            python3 -c "import zipfile; zipfile.ZipFile('TradingAlerts-v2.3-Android.zip').extractall('.')"
+            python3 -c "import zipfile; zipfile.ZipFile('TradingAlerts-v3.0-Android.zip').extractall('.')"
           fi
 
       - name: Set up JDK 17
