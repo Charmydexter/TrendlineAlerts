@@ -64,11 +64,13 @@ jobs:
         working-directory: ${{ env.PROJECT_DIR }}
         run: gradle assembleDebug --no-daemon
 
+      # APK is now named TradingAlerts.apk (set in app/build.gradle.kts); *.apk keeps this robust
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TradingAlerts-LRMLC-debug-apk
-          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          name: TradingAlerts
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
 
       - name: Upload Reports (on failure)
         if: failure()
